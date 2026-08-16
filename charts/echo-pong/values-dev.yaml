@@ -9,7 +9,7 @@ environment: dev
 replicaCount: 2
 
 image:
-  repository: 000000000000.dkr.ecr.eu-west-1.amazonaws.com/echo-pong
+  repository: 000000000000.dkr.ecr.eu-central-1.amazonaws.com/echo-pong
   # Placeholder digest — replaced by the CI-opened GitOps promotion PR.
   # Never a tag, not even in dev: the promotion path must be identical in all
   # three environments or dev stops being a rehearsal for production.
@@ -66,7 +66,7 @@ ingress:
     scheme: internet-facing
     targetType: ip
     groupName: echo-pong-dev
-    certificateArn: arn:aws:acm:eu-west-1:000000000000:certificate/00000000-0000-0000-0000-000000000000
+    certificateArn: arn:aws:acm:eu-central-1:000000000000:certificate/00000000-0000-0000-0000-000000000000
     httpsEnabled: true
     httpEnabled: true
     # No Web ACL association in dev — the dev CloudFront distribution and its

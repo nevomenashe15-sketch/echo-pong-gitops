@@ -15,7 +15,7 @@ environment: prod
 replicaCount: 3
 
 image:
-  repository: 000000000000.dkr.ecr.eu-west-1.amazonaws.com/echo-pong
+  repository: 000000000000.dkr.ecr.eu-central-1.amazonaws.com/echo-pong
   # THE approved, immutable production artifact. Only ever changed by a
   # reviewed promotion PR carrying the scan/signature evidence for this exact
   # digest. Placeholder until the first real release is promoted.
@@ -100,7 +100,7 @@ ingress:
     scheme: internet-facing
     targetType: ip
     groupName: echo-pong-prod
-    certificateArn: arn:aws:acm:eu-west-1:000000000000:certificate/00000000-0000-0000-0000-000000000000
+    certificateArn: arn:aws:acm:eu-central-1:000000000000:certificate/00000000-0000-0000-0000-000000000000
     sslPolicy: ELBSecurityPolicyTLS13-1-2-2021-06
     httpsEnabled: true
     httpEnabled: true
@@ -110,6 +110,6 @@ ingress:
     # Defined by the sibling Terraform repo; associated here because the ALB
     # only exists once the AWS Load Balancer Controller reconciles this
     # Ingress. Exactly one owner for the association — not Terraform.
-    wafv2AclArn: arn:aws:wafv2:eu-west-1:000000000000:regional/webacl/echo-pong-prod/00000000-0000-0000-0000-000000000000
+    wafv2AclArn: arn:aws:wafv2:eu-central-1:000000000000:regional/webacl/echo-pong-prod/00000000-0000-0000-0000-000000000000
     extraAnnotations:
       alb.ingress.kubernetes.io/tags: Environment=prod,Application=echo-pong,ManagedBy=argocd
