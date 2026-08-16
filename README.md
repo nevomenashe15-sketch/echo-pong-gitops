@@ -7,10 +7,10 @@ Terraform repository (`echo-pong-infrastructure`) owns everything up to and
 including "Argo CD is installed and running", and never touches another
 Kubernetes object after that.
 
-> **Status: local staging copy.** Not a git repository, not pushed, never
-> applied to a real cluster or AWS account. Validation was done with
+> **Status:** pushed to [`nevomenashe15-sketch/echo-pong-gitops`](https://github.com/nevomenashe15-sketch/echo-pong-gitops).
+> Never applied to a real cluster or AWS account. Validation was done with
 > `yamllint`, `helm lint`, `helm template`, `kubeconform --strict` and a
-> throwaway local Kind cluster.
+> throwaway local Kind cluster — not a live Argo CD sync.
 
 ---
 
