@@ -1,0 +1,84 @@
+---
+# =============================================================================
+# ApplicationSet: echo-pong dev + staging
+# =============================================================================
+# PRODUCTION IS NOT IN HERE. It is a separate, hand-written Application
+# (application-prod.yaml) precisely so that its sync policy cannot be changed
+# by editing a shared template — a diff that loosened production would be a
+# one-line change here and easy to miss in review. Splitting it makes any
+# change to production's guard rails visible as a change to a file whose only
+# purpose is production.
+#
+# Both environments below use automated sync with prune + selfHeal. See
+# values-staging.yaml for why staging is auto-synced rather than gated: it is
+# the rehearsal, and a rehearsal that uses a different sync mechanism than the
+# thing it rehearses is not a rehearsal.
+#
+# Multi-cluster: `server` is a generator parameter, so moving an environment to
+# its own EKS cluster is a one-line change here plus a destination entry in the
+# AppProject — no template edit.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: echo-pong
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - list:
+        elements:
+          - env: dev
+            namespace: echo-pong-dev
+            server: https://kubernetes.default.svc
+          - env: staging
+            namespace: echo-pong-staging
+            server: https://kubernetes.default.svc
+  template:
+    metadata:
+      name: 'echo-pong-{{ .env }}'
+      labels:
+        echo-pong.io/environment: '{{ .env }}'
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: echo-pong
+      source:
+        repoURL: https://github.com/nevomenashe15-sketch/echo-pong-gitops.git
+        targetRevision: main
+        path: charts/echo-pong
+        helm:
+          releaseName: echo-pong
+          # Base first, overlay second — last file wins, which is the same
+          # ordering used for local `helm template` verification.
+          valueFiles:
+            - values.yaml
+            - 'values-{{ .env }}.yaml'
+      destination:
+        server: '{{ .server }}'
+        namespace: '{{ .namespace }}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        managedNamespaceMetadata:
+          labels:
+            # Pod Security Admission enforced at the API server, so the
+            # chart's securityContext is a hard constraint rather than a
+            # convention that a future edit could quietly drop.
+            pod-security.kubernetes.io/enforce: restricted
+            pod-security.kubernetes.io/audit: restricted
+            pod-security.kubernetes.io/warn: restricted
+            echo-pong.io/environment: '{{ .env }}'
+        syncOptions:
+          - CreateNamespace=true
+          - ServerSideApply=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 30s
+            factor: 2
+            maxDuration: 5m

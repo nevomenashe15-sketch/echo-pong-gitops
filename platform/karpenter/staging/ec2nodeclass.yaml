@@ -1,0 +1,36 @@
+---
+# EC2NodeClass — staging. Same shape as production so staging genuinely
+# rehearses it; only the cluster/role names and tags differ.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: echo-pong-staging
+spec:
+  role: echo-pong-staging-karpenter-node
+  amiSelectorTerms:
+    - alias: al2023@latest
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: echo-pong-staging
+        kubernetes.io/role/internal-elb: "1"
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: echo-pong-staging
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    httpPutResponseHopLimit: 1
+    httpTokens: required
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 20Gi
+        volumeType: gp3
+        encrypted: true
+        deleteOnTermination: true
+  detailedMonitoring: false
+  tags:
+    Environment: staging
+    Application: echo-pong
+    ManagedBy: karpenter
+    Repository: echo-pong-gitops

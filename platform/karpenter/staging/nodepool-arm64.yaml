@@ -1,0 +1,57 @@
+---
+# NodePool — staging, arm64 with SPOT ENABLED.
+#
+# Staging is where the spot toggle is actually exercised. Mixing on-demand and
+# spot here surfaces the real consequence of the app having no SIGTERM handler:
+# every spot reclaim ends in an abrupt kill and a few dropped requests, and
+# that error rate is measurable in staging before anyone argues about enabling
+# spot in production. On-demand is listed first but Karpenter treats the values
+# as a set, not an order — the preference comes from Karpenter's own
+# price-capacity-optimised allocation.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: echo-pong-staging-arm64
+spec:
+  weight: 100
+  template:
+    metadata:
+      labels:
+        echo-pong.io/nodegroup: app
+        echo-pong.io/arch-pool: arm64
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: echo-pong-staging
+      expireAfter: 168h
+      terminationGracePeriod: 6h
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["c7g", "m7g", "r7g", "c8g", "m8g"]
+        - key: karpenter.k8s.aws/instance-size
+          operator: In
+          values: ["medium", "large"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+  limits:
+    cpu: "16"
+    memory: 64Gi
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    consolidateAfter: 2m
+    budgets:
+      # No business-hours freeze in staging: churn here is information, not
+      # risk, and the disruption budget is the thing being validated.
+      - nodes: "20%"

@@ -1,0 +1,71 @@
+---
+# =============================================================================
+# NodePool — production, amd64 FALLBACK
+# =============================================================================
+# WHY THIS EXISTS
+# The echo-pong chart expresses arm64 as a SOFT preference so that a Graviton
+# capacity shortage degrades to "runs on amd64" instead of "pods stay Pending".
+# That promise is only real if amd64 capacity can actually be created. With an
+# arm64-only NodePool, the soft preference would be decorative: the scheduler
+# would have nowhere else to place the pod and Karpenter would have no pool
+# able to provision one.
+#
+# Lower weight than the arm64 pool, so it is used only when the preferred pool
+# cannot satisfy the request — e.g. an InsufficientInstanceCapacity error for
+# every allowed Graviton type in every allowed AZ.
+#
+# The image is a multi-arch manifest list (linux/amd64 + linux/arm64), so pods
+# landing here run the correct binary with no other change.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: echo-pong-prod-amd64-fallback
+spec:
+  weight: 10
+
+  template:
+    metadata:
+      labels:
+        echo-pong.io/nodegroup: app
+        echo-pong.io/arch-pool: amd64
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: echo-pong-prod
+      expireAfter: 336h
+      terminationGracePeriod: 24h
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["amd64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["c7i", "m7i", "c6i", "m6i"]
+        - key: karpenter.k8s.aws/instance-size
+          operator: In
+          values: ["medium", "large", "xlarge"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+
+  # Deliberately smaller than the arm64 pool's limit. This is an escape hatch
+  # for a capacity incident, not a second home for the workload — if it is ever
+  # near this ceiling, that is a signal to investigate, not to raise it.
+  limits:
+    cpu: "16"
+    memory: 64Gi
+
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    # Shorter than the arm64 pool: once Graviton capacity returns, pods should
+    # drift back to the preferred pool and these nodes should go away promptly.
+    consolidateAfter: 2m
+    budgets:
+      - nodes: "10%"

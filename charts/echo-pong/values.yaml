@@ -1,0 +1,466 @@
+---
+# =============================================================================
+# echo-pong — base values
+# =============================================================================
+# This file is the SHARED baseline. It is never applied on its own; every real
+# deployment layers exactly one environment overlay on top:
+#
+#   helm template echo-pong charts/echo-pong \
+#     -f charts/echo-pong/values.yaml \
+#     -f charts/echo-pong/values-prod.yaml
+#
+# Overlays: values-dev.yaml, values-staging.yaml, values-prod.yaml.
+# values-kind.yaml is a LOCAL-ONLY smoke-test overlay, not an environment.
+#
+# Nothing secret ever appears here. The app's bearer token is fetched from AWS
+# Secrets Manager by the External Secrets Operator and mounted as a file; only
+# the secret's *name* is configured below.
+# =============================================================================
+
+# Free-form environment marker, surfaced as the echo-pong.io/environment label.
+# Set by each overlay ("dev" / "staging" / "prod").
+environment: ""
+
+# Baseline replica count. Ignored whenever autoscaling.enabled is true (the
+# HPA owns spec.replicas in that case and Helm must not fight it).
+replicaCount: 2
+
+revisionHistoryLimit: 3
+
+image:
+  # Private ECR repository. Populated per environment; the placeholder here
+  # keeps `helm lint`/`helm template` on the bare base file meaningful.
+  repository: 000000000000.dkr.ecr.eu-west-1.amazonaws.com/echo-pong
+  # Immutable digest — ALWAYS set in every committed environment overlay.
+  # Promotion between environments = a reviewed PR changing this one line.
+  digest: ""
+  # Mutable tag fallback. Only used when digest is empty (local rendering).
+  # `latest` is deliberately NOT the default value anywhere in this repo.
+  tag: "0.1.0"
+  # Digest-pinned images are immutable, so IfNotPresent is both correct and
+  # cheaper than Always (no registry round-trip per pod start).
+  pullPolicy: IfNotPresent
+  pullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+# -----------------------------------------------------------------------------
+# ServiceAccount
+# -----------------------------------------------------------------------------
+serviceAccount:
+  create: true
+  name: ""
+  # The echo-pong pod needs NO AWS identity. It never calls an AWS API: the
+  # External Secrets Operator (with its own ServiceAccount + EKS Pod Identity
+  # association) does the Secrets Manager read and writes a plain Kubernetes
+  # Secret, which this pod simply mounts. So this map stays empty.
+  #
+  # Kept as a documented example only, for platform components that DO need an
+  # AWS identity and where IRSA is still the fallback because the controller
+  # version in use predates EKS Pod Identity support:
+  #
+  #   annotations:
+  #     eks.amazonaws.com/role-arn: arn:aws:iam::<account-id>:role/<irsa-role>
+  annotations: {}
+  # The app never talks to the Kubernetes API server, so it does not need a
+  # projected API token mounted into it.
+  automountServiceAccountToken: false
+
+podAnnotations: {}
+podLabels: {}
+
+# -----------------------------------------------------------------------------
+# Security hardening
+# -----------------------------------------------------------------------------
+# 65532 is the UID/GID the distroless `static-debian12:nonroot` base already
+# runs as; restating it here means the intent is enforced by the API server
+# (and by Pod Security Admission "restricted") rather than merely inherited.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  # fsGroup matters for the mounted Secret: Kubernetes creates secret volume
+  # files owned root:fsGroup, so 65532 here plus mode 0440 below is what makes
+  # the token readable by the app without making it world-readable.
+  fsGroup: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  # The Go binary is static (CGO_ENABLED=0) and writes nothing to disk: it
+  # logs to stdout, reads the token once at startup, and serves fixed JSON/HTML
+  # from memory. There is no multipart form parsing, no os.CreateTemp, no cache
+  # directory — so a writable /tmp is genuinely not required. See tmpVolume.
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  capabilities:
+    drop:
+      - ALL
+
+# Scratch space. Left OFF by default because the app provably does not write
+# to the filesystem (see above). Flip to true only if a future code change
+# introduces temp-file use; a bare `emptyDir` at /tmp is then the fix, not
+# relaxing readOnlyRootFilesystem.
+tmpVolume:
+  enabled: false
+  sizeLimit: 16Mi
+
+# -----------------------------------------------------------------------------
+# Application configuration
+# -----------------------------------------------------------------------------
+app:
+  port: 8080
+  # Extra plain (NON-SECRET) environment variables. PORT and SECRET_FILE_PATH
+  # are set by the chart itself and must not be duplicated here.
+  extraEnv: []
+
+# Where the ESO-materialised Kubernetes Secret is mounted, and under which
+# key. SECRET_FILE_PATH is computed from these two fields, so the app and the
+# volume mount can never drift apart.
+secret:
+  mountPath: /etc/echo-pong/secret
+  key: token
+  # 0440 = owner(root) + group(fsGroup 65532) read; no world read.
+  #
+  # Verified on a live cluster rather than assumed: secret volume files are
+  # owned root:<fsGroup>, and when fsGroup is set the kubelet's volume
+  # ownership management widens the group bits to mirror the owner's read bit.
+  # So 0400 and 0440 both end up as -r--r----- on disk and both are readable
+  # by UID 65532. 0440 is written here because it states the EFFECTIVE result
+  # explicitly instead of depending on that widening behaviour — if fsGroup is
+  # ever removed (e.g. moving to fsGroupChangePolicy: None, or a CSI-provided
+  # secret store driver that does not apply it), 0440 still works and 0400
+  # would silently become unreadable and crash the app at startup.
+  defaultMode: 0440
+
+# -----------------------------------------------------------------------------
+# External Secrets Operator
+# -----------------------------------------------------------------------------
+externalSecret:
+  enabled: true
+  # ESO promoted its API to external-secrets.io/v1 in v0.14. Templated so a
+  # controller upgrade is a values change, not a chart edit.
+  apiVersion: external-secrets.io/v1beta1
+  # The ClusterSecretStore is a PLATFORM object (platform/external-secrets/),
+  # created once per cluster and backed by ESO's own EKS Pod Identity
+  # association. This chart only references it.
+  secretStoreRef:
+    name: aws-secretsmanager
+    kind: ClusterSecretStore
+  refreshInterval: 1h
+  # Name of the Kubernetes Secret ESO writes. Defaults to <fullname>-token.
+  targetSecretName: ""
+  creationPolicy: Owner
+  # Retain: deleting the ExternalSecret does not immediately delete the live
+  # Secret, so an accidental prune cannot instantly break running pods.
+  deletionPolicy: Retain
+  # AWS Secrets Manager secret NAME (or full ARN). Metadata only — provisioned
+  # by the sibling Terraform repo. The value never touches Git.
+  remoteRef:
+    key: echo-pong/token
+    # JSON property inside the secret, if the secret stores a JSON document.
+    # Empty = the secret's whole string value is used verbatim.
+    property: ""
+    # Optional explicit version stage/id; empty = AWSCURRENT.
+    version: ""
+
+  # Optional per-namespace SecretStore instead of the shared cluster-scoped
+  # one. Off by default: a namespaced SecretStore would need its own
+  # ServiceAccount + Pod Identity association, duplicating platform wiring.
+  secretStore:
+    create: false
+    region: eu-west-1
+    serviceAccountRef: ""
+
+# -----------------------------------------------------------------------------
+# Service (ClusterIP)
+# -----------------------------------------------------------------------------
+# ClusterIP only. The ALB targets Pod IPs directly (target-type: ip), so this
+# Service exists for in-cluster addressing and as the Ingress backend the AWS
+# Load Balancer Controller reads to discover pods — NOT as a data-path hop.
+service:
+  type: ClusterIP
+  port: 80
+  annotations: {}
+
+# -----------------------------------------------------------------------------
+# Ingress → AWS Application Load Balancer
+# -----------------------------------------------------------------------------
+ingress:
+  enabled: false
+  className: alb
+  host: ""
+  path: /
+  pathType: Prefix
+  # ALB behaviour knobs, rendered into alb.ingress.kubernetes.io/* annotations.
+  alb:
+    scheme: internet-facing
+    targetType: ip
+    # Sharing one ALB across Ingresses in a group. Empty = a dedicated ALB.
+    groupName: ""
+    groupOrder: ""
+    # ACM certificate ARN for the ALB's HTTPS listener (regional cert, created
+    # by the sibling Terraform repo). Required whenever httpsEnabled is true.
+    certificateArn: ""
+    sslPolicy: ELBSecurityPolicyTLS13-1-2-2021-06
+    httpsEnabled: true
+    # Expose :80 at all? When true the controller also installs a permanent
+    # 301 redirect to :443 — plaintext is never actually served.
+    httpEnabled: true
+    healthcheckPath: /health
+    healthcheckIntervalSeconds: 10
+    healthcheckTimeoutSeconds: 5
+    healthyThresholdCount: 2
+    unhealthyThresholdCount: 2
+    successCodes: "200"
+    # Must be comfortably shorter than preStop sleep + grace period so the
+    # target is fully deregistered before the process is killed.
+    deregistrationDelaySeconds: 10
+    idleTimeoutSeconds: 60
+    # Regional WAFv2 Web ACL ARN. The Web ACL itself is defined by the sibling
+    # Terraform repo; the ASSOCIATION has to happen here because the ALB does
+    # not exist until this Ingress is reconciled. Terraform must not also try
+    # to associate it — exactly one owner.
+    wafv2AclArn: ""
+    # Extra raw alb.ingress.kubernetes.io/* annotations (access logs, tags...).
+    extraAnnotations: {}
+  extraAnnotations: {}
+  tls: []
+
+# -----------------------------------------------------------------------------
+# Resources
+# -----------------------------------------------------------------------------
+# A single static Go binary serving fixed JSON with no dependencies. Idle RSS
+# is a few MB; the request path allocates almost nothing. Requests are sized
+# for scheduling honesty rather than headroom, limits leave ~2x burst room.
+# CPU limit is intentionally present (not omitted) because this workload has
+# no legitimate reason to burst beyond it, and an unbounded tiny service is a
+# noisy-neighbour risk on shared Karpenter capacity.
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# -----------------------------------------------------------------------------
+# Probes — all three hit the single public GET /health endpoint
+# -----------------------------------------------------------------------------
+# The app sleeps 10s BEFORE ListenAndServe, so nothing answers on the port at
+# all during that window (connection refused, not a slow 200).
+#
+# startupProbe absorbs that window with a large budget. While a startupProbe is
+# configured and has not yet succeeded, kubelet does not evaluate readiness or
+# liveness at all — that is the built-in gating, so no redundant
+# initialDelaySeconds is set on the other two probes.
+startupProbe:
+  enabled: true
+  initialDelaySeconds: 0
+  periodSeconds: 2
+  timeoutSeconds: 2
+  # 30 * 2s = 60s budget for a 10s sleep: 6x headroom for slow image pulls,
+  # cold Karpenter nodes and CPU-throttled starts, while still failing a
+  # genuinely broken container within a minute.
+  failureThreshold: 30
+  successThreshold: 1
+
+# Readiness gates ALB target registration. Fast period, low threshold: a pod
+# that stops serving should leave the target group quickly.
+readinessProbe:
+  enabled: true
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 3
+  successThreshold: 1
+
+# Liveness is deliberately slacker than readiness: restarting a pod is a much
+# more destructive remedy than removing it from the load balancer, so it needs
+# more evidence before acting.
+livenessProbe:
+  enabled: true
+  periodSeconds: 10
+  timeoutSeconds: 2
+  failureThreshold: 3
+  successThreshold: 1
+
+# -----------------------------------------------------------------------------
+# Lifecycle / shutdown
+# -----------------------------------------------------------------------------
+# IMPORTANT, read chart README "Shutdown behaviour": the app has NO SIGTERM
+# handling. main() ends at log.Fatal(srv.ListenAndServe()) — no
+# signal.NotifyContext, no srv.Shutdown(). It does not drain anything; it dies
+# the instant SIGTERM is delivered.
+#
+# The compensating pattern is a preStop sleep that delays SIGTERM delivery
+# long enough for endpoint removal + ALB target deregistration to complete
+# first. It reduces dropped in-flight requests; it does not eliminate them.
+lifecycle:
+  preStop:
+    enabled: true
+    # Native sleep action (KEP-3960). Required here because the distroless
+    # base image has NO shell and NO /bin/sleep, so the usual
+    # `exec: ["/bin/sh","-c","sleep 5"]` hook simply cannot run in this image.
+    # Needs Kubernetes >= 1.30 (beta, on by default); GA in 1.32.
+    type: sleep
+    seconds: 5
+
+# preStop sleep (5s) + slack for the kubelet to deliver SIGTERM and reap the
+# process. Kept short because the app cannot use a long grace period for
+# anything — it has no drain phase.
+terminationGracePeriodSeconds: 15
+
+# -----------------------------------------------------------------------------
+# Rollout strategy
+# -----------------------------------------------------------------------------
+# maxUnavailable: 0 — never remove a serving pod before its replacement is
+# Ready. Combined with the ~10s+ startup budget this makes rollouts slower but
+# keeps the ready-replica count at or above the desired count throughout.
+updateStrategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+# -----------------------------------------------------------------------------
+# Scheduling
+# -----------------------------------------------------------------------------
+# SOFT arm64 preference, never a hard nodeSelector/required affinity.
+# The image is a multi-arch manifest list (linux/amd64 + linux/arm64), so an
+# amd64 node is a fully valid fallback. A hard requirement would convert a
+# temporary Graviton capacity shortage (spot reclaim, AZ-level ICE) into an
+# outage — unschedulable pods — in exchange for a cost optimisation. Soft
+# preference gets the same placement in the normal case and degrades to
+# "runs on amd64, costs slightly more" in the bad case.
+nodeAffinity:
+  preferArm64: true
+  arm64Weight: 90
+  # Additional weighted preferences, e.g. steering to on-demand capacity.
+  extraPreferred: []
+  # Hard node requirements. Deliberately empty — see above.
+  required: []
+
+nodeSelector: {}
+tolerations: []
+# Fully-formed affinity block. When set, it REPLACES everything generated from
+# nodeAffinity above (escape hatch, normally unused).
+affinity: {}
+
+# Spread across failure domains. Both axes are required by the design:
+#   zone     — survives an AZ loss
+#   hostname — stops all replicas landing on one (possibly large) node, which
+#              would make a single node drain/spot-reclaim an outage
+topologySpreadConstraints:
+  enabled: true
+  zone:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+  hostname:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+  # Scope the spread calculation to a single ReplicaSet revision. Without this,
+  # during a rollout the old and new revisions are counted together and a
+  # strict DoNotSchedule constraint can deadlock the surge pod. Requires
+  # Kubernetes >= 1.27 (beta) / 1.30 (GA).
+  matchLabelKeys:
+    - pod-template-hash
+
+# -----------------------------------------------------------------------------
+# Availability
+# -----------------------------------------------------------------------------
+podDisruptionBudget:
+  enabled: true
+  # Absolute number. Set exactly one of minAvailable / maxUnavailable.
+  #
+  # The base default is 1, NOT 2. The design requirement of "at least 2 ready
+  # replicas" is a PRODUCTION requirement and is set in values-prod.yaml, where
+  # autoscaling.minReplicas is 3. Defaulting to 2 here would pair with the base
+  # autoscaling.minReplicas of 2 to produce a PDB that can never allow a single
+  # voluntary eviction — node drains, cluster upgrades and Karpenter
+  # consolidation would all deadlock. The hpa.yaml template hard-fails on that
+  # combination rather than letting it render.
+  minAvailable: 1
+  maxUnavailable: ""
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 0
+  behavior:
+    scaleUp:
+      # No stabilisation delay on the way up: a new pod already costs ~10s of
+      # startup sleep before it can take traffic, so waiting first is worse.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 30
+        - type: Pods
+          value: 2
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      # Conservative on the way down: reacquiring a pod is slow (startup
+      # sleep + possible Karpenter node provisioning), so flapping is costly.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+
+# -----------------------------------------------------------------------------
+# NetworkPolicy — default deny, then narrow allowances
+# -----------------------------------------------------------------------------
+# Read the chart README section "What the NetworkPolicy can and cannot do"
+# before changing this. Summary of the honest limits:
+#
+#   * The ALB uses target-type: ip and connects to Pod IPs from its own ENIs
+#     in the VPC. That source is NOT a pod, so podSelector/namespaceSelector
+#     rules cannot match it. The only expressible allowance is an ipBlock, and
+#     the practical CIDR is the VPC (or the ALB subnets). That is coarse: it
+#     permits anything in those subnets to reach :8080, not "the ALB only".
+#     Application authentication (the bearer token) and the CloudFront origin
+#     header enforced by the regional WAFv2 Web ACL are what actually gate who
+#     may call the API — the NetworkPolicy is a blast-radius control, not the
+#     front door.
+#   * What it does do well is East-West: no other pod in the cluster may open
+#     a connection to echo-pong unless its namespace/pod labels match below.
+#   * Enforcement depends entirely on a policy engine being present (VPC CNI
+#     network policy agent, or Calico/Cilium). With plain VPC CNI and the
+#     policy agent disabled, these objects are accepted by the API server and
+#     silently do nothing.
+networkPolicy:
+  enabled: true
+  # CIDRs allowed to reach the app port. Must cover the ALB subnets. Narrow
+  # this to just the public/ALB subnet CIDRs rather than the whole VPC where
+  # the subnet layout is known.
+  albSourceCidrs:
+    - 10.0.0.0/16
+  # Additional in-cluster sources (observability scrapers, etc.). Each entry is
+  # a raw NetworkPolicyPeer.
+  extraIngressFrom: []
+  egress:
+    # The app makes ZERO outbound connections: no database, no upstream API,
+    # no AWS SDK call. The token arrives as a mounted file written by ESO —
+    # ESO's own pod does the Secrets Manager call, not this one. Image pulls
+    # happen in the kubelet on the node and are not subject to pod
+    # NetworkPolicy at all. So there is genuinely nothing to allow here.
+    #
+    # DNS is left ON as the single allowance: it costs nothing, and a silent
+    # DNS blackhole is a notoriously confusing failure mode to debug if
+    # anything (a future sidecar, an exec probe, an operator) ever needs it.
+    # Set to false for a strict zero-egress posture — the app itself will not
+    # notice.
+    dns: true
+    # Anything else must be added explicitly, with a reason, as raw egress
+    # rules. Deliberately empty: no speculative "443 to the world" rule.
+    extraEgress: []
+
+# Extra arbitrary manifests are intentionally not supported; add a template.

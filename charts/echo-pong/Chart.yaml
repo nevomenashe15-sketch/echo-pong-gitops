@@ -1,0 +1,31 @@
+---
+apiVersion: v2
+name: echo-pong
+description: >-
+  Helm chart for the echo-pong Go HTTP service (ping/pong API) running on
+  EKS behind an AWS ALB provisioned by the AWS Load Balancer Controller,
+  with its bearer token synced from AWS Secrets Manager by the External
+  Secrets Operator and mounted as a read-only file.
+type: application
+
+# Chart version: bumped when the chart templates change.
+version: 0.1.0
+
+# appVersion tracks the echo-pong application release the chart defaults to.
+# It is documentation only — the deployed artifact is always the immutable
+# digest in image.digest, never this string.
+appVersion: "0.1.0"
+
+home: https://github.com/nevomenashe15-sketch/echo-pong-gitops
+sources:
+  - https://github.com/nevomenashe15-sketch/echo-pong
+  - https://github.com/nevomenashe15-sketch/echo-pong-gitops
+
+keywords:
+  - echo-pong
+  - eks
+  - graviton
+  - gitops
+
+maintainers:
+  - name: echo-pong platform

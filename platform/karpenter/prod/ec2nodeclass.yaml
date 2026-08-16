@@ -1,0 +1,64 @@
+---
+# =============================================================================
+# EC2NodeClass — production node hardware/AMI/networking template
+# =============================================================================
+# Owned by this repo (post-bootstrap GitOps). The sibling Terraform repo owns
+# only the IAM role named below, the instance profile, and the
+# `karpenter.sh/discovery` tags on the subnets and security groups that the
+# selectors here match.
+apiVersion: karpenter.k8s.aws/v1
+kind: EC2NodeClass
+metadata:
+  name: echo-pong-prod
+spec:
+  # EXACT role name created by the Terraform repo. Karpenter manages the
+  # instance profile for this role itself.
+  role: echo-pong-prod-karpenter-node
+
+  amiSelectorTerms:
+    # Pinned to a family alias rather than a specific AMI ID: AL2023 patch
+    # AMIs are how CVEs reach the fleet, and `expireAfter` below is what
+    # actually rolls nodes onto them. Pin to a concrete `id:` term instead if
+    # AMI changes must themselves go through a promotion PR — that is a real
+    # trade-off between patch latency and change control, and this side of it
+    # (fast patching) is the deliberate choice for a stateless HTTP service.
+    - alias: al2023@latest
+
+  # PRIVATE subnets only. Nodes never get a public IP; the ALB lives in the
+  # public subnets and reaches Pod IPs across the VPC.
+  subnetSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: echo-pong-prod
+        kubernetes.io/role/internal-elb: "1"
+
+  securityGroupSelectorTerms:
+    - tags:
+        karpenter.sh/discovery: echo-pong-prod
+
+  metadataOptions:
+    httpEndpoint: enabled
+    httpProtocolIPv6: disabled
+    # Hop limit 1 means IMDS is reachable from the node itself but NOT from a
+    # pod's network namespace — this is what stops a compromised container
+    # from stealing the node's IAM role credentials.
+    httpPutResponseHopLimit: 1
+    # IMDSv2 only.
+    httpTokens: required
+
+  blockDeviceMappings:
+    - deviceName: /dev/xvda
+      ebs:
+        volumeSize: 20Gi
+        volumeType: gp3
+        encrypted: true
+        deleteOnTermination: true
+
+  # Detailed CloudWatch monitoring: worth the small cost on production nodes
+  # for 1-minute metric granularity during incidents.
+  detailedMonitoring: true
+
+  tags:
+    Environment: prod
+    Application: echo-pong
+    ManagedBy: karpenter
+    Repository: echo-pong-gitops

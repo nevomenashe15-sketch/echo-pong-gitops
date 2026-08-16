@@ -1,0 +1,206 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "echo-pong.fullname" . }}
+  labels:
+    {{- include "echo-pong.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
+  strategy:
+    {{- toYaml .Values.updateStrategy | nindent 4 }}
+  selector:
+    matchLabels:
+      {{- include "echo-pong.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "echo-pong.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Roll the pods when the mounted-secret wiring changes. NOT a hash of
+        # the secret value (which this chart never sees) — only of the path,
+        # key and remote reference, all of which are non-sensitive.
+        checksum/secret-config: {{ printf "%s|%s|%s" (include "echo-pong.secretFilePath" .) (include "echo-pong.secretName" .) .Values.externalSecret.remoteRef.key | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "echo-pong.serviceAccountName" . }}
+      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: {{ include "echo-pong.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.app.port }}
+              protocol: TCP
+          env:
+            - name: PORT
+              value: {{ .Values.app.port | quote }}
+            # Path only. The token itself is never an env var, never a Helm
+            # value, never in Git — it is read from the mounted file below.
+            - name: SECRET_FILE_PATH
+              value: {{ include "echo-pong.secretFilePath" . | quote }}
+            {{- with .Values.app.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- if .Values.startupProbe.enabled }}
+          # Gates readiness and liveness: while this probe has not yet
+          # succeeded, kubelet does not run the other two at all. That is what
+          # covers the app's 10s pre-listener sleep without any manual
+          # initialDelaySeconds on liveness.
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            initialDelaySeconds: {{ .Values.startupProbe.initialDelaySeconds }}
+            periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.startupProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+            successThreshold: {{ .Values.startupProbe.successThreshold }}
+          {{- end }}
+          {{- if .Values.readinessProbe.enabled }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.readinessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.readinessProbe.failureThreshold }}
+            successThreshold: {{ .Values.readinessProbe.successThreshold }}
+          {{- end }}
+          {{- if .Values.livenessProbe.enabled }}
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+              scheme: HTTP
+            periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+            timeoutSeconds: {{ .Values.livenessProbe.timeoutSeconds }}
+            failureThreshold: {{ .Values.livenessProbe.failureThreshold }}
+            successThreshold: {{ .Values.livenessProbe.successThreshold }}
+          {{- end }}
+          {{- if .Values.lifecycle.preStop.enabled }}
+          # The app has no SIGTERM handler and no srv.Shutdown(); it dies
+          # immediately when SIGTERM arrives. This hook delays that signal so
+          # endpoint removal and ALB target deregistration land first. It
+          # reduces, but does not eliminate, dropped in-flight requests.
+          lifecycle:
+            preStop:
+              {{- if eq .Values.lifecycle.preStop.type "sleep" }}
+              # Native sleep action — the distroless image has no shell and no
+              # sleep binary, so an exec hook is not an option here.
+              sleep:
+                seconds: {{ .Values.lifecycle.preStop.seconds }}
+              {{- else }}
+              exec:
+                command: ["/bin/sh", "-c", "sleep {{ .Values.lifecycle.preStop.seconds }}"]
+              {{- end }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: secret-token
+              mountPath: {{ .Values.secret.mountPath }}
+              readOnly: true
+            {{- if .Values.tmpVolume.enabled }}
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
+      volumes:
+        # Written by the ExternalSecret in this chart; ESO is the only thing
+        # that ever populates it.
+        - name: secret-token
+          secret:
+            secretName: {{ include "echo-pong.secretName" . }}
+            defaultMode: {{ .Values.secret.defaultMode }}
+            items:
+              - key: {{ .Values.secret.key }}
+                path: {{ .Values.secret.key }}
+        {{- if .Values.tmpVolume.enabled }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.tmpVolume.sizeLimit }}
+        {{- end }}
+      {{- if .Values.topologySpreadConstraints.enabled }}
+      topologySpreadConstraints:
+        {{- if .Values.topologySpreadConstraints.zone.enabled }}
+        - maxSkew: {{ .Values.topologySpreadConstraints.zone.maxSkew }}
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: {{ .Values.topologySpreadConstraints.zone.whenUnsatisfiable }}
+          {{- with .Values.topologySpreadConstraints.matchLabelKeys }}
+          matchLabelKeys:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          labelSelector:
+            matchLabels:
+              {{- include "echo-pong.selectorLabels" . | nindent 14 }}
+        {{- end }}
+        {{- if .Values.topologySpreadConstraints.hostname.enabled }}
+        - maxSkew: {{ .Values.topologySpreadConstraints.hostname.maxSkew }}
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: {{ .Values.topologySpreadConstraints.hostname.whenUnsatisfiable }}
+          {{- with .Values.topologySpreadConstraints.matchLabelKeys }}
+          matchLabelKeys:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          labelSelector:
+            matchLabels:
+              {{- include "echo-pong.selectorLabels" . | nindent 14 }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.affinity }}
+      affinity:
+        {{- toYaml .Values.affinity | nindent 8 }}
+      {{- else if or .Values.nodeAffinity.preferArm64 .Values.nodeAffinity.extraPreferred .Values.nodeAffinity.required }}
+      affinity:
+        nodeAffinity:
+          {{- if or .Values.nodeAffinity.preferArm64 .Values.nodeAffinity.extraPreferred }}
+          # PREFERRED, not required. The image is a multi-arch manifest list,
+          # so amd64 is a correct fallback. A hard arch requirement would turn
+          # transient Graviton capacity shortage into unschedulable pods.
+          preferredDuringSchedulingIgnoredDuringExecution:
+            {{- if .Values.nodeAffinity.preferArm64 }}
+            - weight: {{ .Values.nodeAffinity.arm64Weight }}
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/arch
+                    operator: In
+                    values:
+                      - arm64
+            {{- end }}
+            {{- with .Values.nodeAffinity.extraPreferred }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- end }}
+          {{- with .Values.nodeAffinity.required }}
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              {{- toYaml . | nindent 14 }}
+          {{- end }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

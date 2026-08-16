@@ -1,0 +1,42 @@
+{{- if .Values.autoscaling.enabled }}
+{{- $pdbMin := toString .Values.podDisruptionBudget.minAvailable -}}
+{{- if and .Values.podDisruptionBudget.enabled (regexMatch "^[0-9]+$" $pdbMin) }}
+{{- if le (int .Values.autoscaling.minReplicas) (int $pdbMin) }}
+{{- fail "autoscaling.minReplicas must be greater than podDisruptionBudget.minAvailable, otherwise node drains and Karpenter consolidation deadlock" }}
+{{- end }}
+{{- end }}
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "echo-pong.fullname" . }}
+  labels:
+    {{- include "echo-pong.labels" . | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "echo-pong.fullname" . }}
+  minReplicas: {{ .Values.autoscaling.minReplicas }}
+  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    # Off by default: this app's memory is flat and unrelated to load, so a
+    # memory target would only ever produce noise.
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- end }}
+  {{- with .Values.autoscaling.behavior }}
+  behavior:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}

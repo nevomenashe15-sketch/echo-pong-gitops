@@ -1,0 +1,114 @@
+---
+# =============================================================================
+# LOCAL ONLY — Kind smoke test. NOT an environment overlay.
+# =============================================================================
+# This file exists so `helm install` can be exercised against a throwaway local
+# Kind cluster to prove the CHART MECHANICS work: templates render, the API
+# server accepts every object, the Deployment rolls out, the Service selects
+# the pods, the PDB and NetworkPolicy are admitted.
+#
+# It is EXPLICITLY NOT a test of echo-pong:
+#   * the image is a public placeholder, not the real ECR digest (Kind cannot
+#     pull from a private ECR repo and the real image needs a token file that
+#     only ESO can produce);
+#   * the ExternalSecret is disabled because Kind has no ESO CRDs and no AWS;
+#   * the Ingress is disabled because Kind has no AWS Load Balancer Controller
+#     (an `alb` IngressClass would never be reconciled);
+#   * the HPA is disabled because Kind has no metrics-server by default.
+#
+# Never referenced by any Argo CD Application. Never deployed to AWS.
+#
+#   kind create cluster --name echo-pong-smoke
+#   helm install echo-pong charts/echo-pong \
+#     -f charts/echo-pong/values.yaml -f charts/echo-pong/values-kind.yaml
+# =============================================================================
+environment: kind
+
+replicaCount: 2
+
+image:
+  # Placeholder public image, chosen because it happens to match the runtime
+  # SHAPE of echo-pong: a tiny static Go binary, multi-arch, no shell, content
+  # from memory, works under readOnlyRootFilesystem and an arbitrary non-root
+  # UID. It answers 200 on every path, including /health, which is what lets
+  # the real probe configuration be exercised rather than switched off.
+  # It is NOT echo-pong and shares none of its behaviour (no auth, no secret
+  # file, no 10s startup sleep).
+  repository: traefik/whoami
+  digest: ""
+  tag: "v1.10.2"
+  pullPolicy: IfNotPresent
+
+app:
+  port: 8080
+  extraEnv:
+    # whoami defaults to :80; point it at the chart's app.port instead.
+    - name: WHOAMI_PORT_NUMBER
+      value: "8080"
+
+# The placeholder image ignores SECRET_FILE_PATH, but the chart still mounts
+# the Secret volume, so a dummy Secret has to exist for the pod to start.
+# Create it before installing (a dummy value, local cluster only):
+#   kubectl create secret generic echo-pong-token --from-literal=token=dummy
+externalSecret:
+  enabled: false
+
+# All three probes stay ENABLED with the real production timings. The
+# placeholder image answers 200 on /health, so this exercises the actual probe
+# configuration — including that startupProbe gates the other two — rather
+# than disabling the thing under test. What it does NOT exercise is the 10s
+# startup sleep, because the placeholder starts instantly.
+
+# The native `sleep` preStop action needs Kubernetes >= 1.30. Kept enabled so
+# the smoke test also proves the local API server accepts it; set to false if
+# the local Kind node image is older.
+lifecycle:
+  preStop:
+    enabled: true
+    type: sleep
+    seconds: 5
+
+ingress:
+  enabled: false
+
+autoscaling:
+  enabled: false
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: ""
+
+# Single-node Kind cluster: strict spreading would leave pods Pending.
+topologySpreadConstraints:
+  enabled: true
+  zone:
+    enabled: false
+  hostname:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: ScheduleAnyway
+  matchLabelKeys:
+    - pod-template-hash
+
+# Kind's default CNI (kindnetd) does NOT implement NetworkPolicy. The object
+# below is accepted by the API server and then ignored. Its presence here
+# validates the schema, nothing about enforcement.
+networkPolicy:
+  enabled: true
+  albSourceCidrs:
+    - 10.244.0.0/16
+
+# Kind nodes are amd64 here; the arm64 preference stays on precisely to prove
+# it is soft (pods must still schedule on a cluster with zero arm64 nodes).
+nodeAffinity:
+  preferArm64: true
+  arm64Weight: 90
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 32Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi

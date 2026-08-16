@@ -1,0 +1,67 @@
+echo-pong {{ .Chart.Version }} released as "{{ .Release.Name }}" in namespace {{ .Release.Namespace }}.
+
+Image:  {{ include "echo-pong.image" . }}
+{{- if not .Values.image.digest }}
+
+  !! WARNING: this release is pinned to a MUTABLE TAG, not a digest.
+     Every committed environment overlay (values-dev/staging/prod.yaml) must
+     set image.digest. Tags are for local rendering only.
+{{- end }}
+
+Secret:  {{ include "echo-pong.secretName" . }} (written by External Secrets Operator)
+Mounted: {{ include "echo-pong.secretFilePath" . }} (read-only file, SECRET_FILE_PATH)
+Remote:  AWS Secrets Manager "{{ .Values.externalSecret.remoteRef.key }}"
+         The value is never stored in this chart, in Git, or in an env var.
+
+Endpoints (through CloudFront -> WAF -> ALB, never the ALB directly):
+  GET /ping    requires  Authorization: Bearer <token>   (or the raw token)
+  GET /pong    requires  Authorization: Bearer <token>   (or the raw token)
+  GET /health  public, always 200 — used by all three probes AND by the ALB
+  GET /        public HTML documentation page
+
+--------------------------------------------------------------------------
+SHUTDOWN BEHAVIOUR — READ THIS BEFORE RELYING ON ZERO-DOWNTIME CLAIMS
+--------------------------------------------------------------------------
+The echo-pong binary has NO SIGTERM handling of any kind. main() ends at
+`log.Fatal(srv.ListenAndServe())`: there is no signal.NotifyContext and no
+srv.Shutdown(). The process does not drain in-flight requests — it dies the
+moment SIGTERM is delivered, and any connection being served at that instant
+is cut.
+
+{{ if .Values.lifecycle.preStop.enabled -}}
+This release compensates with a preStop hook ({{ .Values.lifecycle.preStop.type }}, {{ .Values.lifecycle.preStop.seconds }}s) and
+terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}. During the preStop window the pod has already
+been removed from the Service endpoints and the ALB target group is
+deregistering ({{ .Values.ingress.alb.deregistrationDelaySeconds }}s), so by the time SIGTERM is actually delivered the pod
+should no longer be receiving NEW requests.
+
+That is a mitigation, NOT graceful shutdown:
+  * requests still in flight when the sleep ends are still dropped;
+  * a long-running request that outlives the preStop window is still cut;
+  * correctness depends on deregistration finishing inside the window.
+The real fix is a signal handler + srv.Shutdown() in the application. Until
+that ships, do not describe this deployment as "gracefully draining".
+{{- else -}}
+preStop is DISABLED in this release. SIGTERM is delivered immediately on pod
+termination and in-flight requests are dropped without any mitigation.
+{{- end }}
+
+--------------------------------------------------------------------------
+STARTUP
+--------------------------------------------------------------------------
+The app sleeps 10s BEFORE opening its listener, so the port refuses
+connections entirely during that window. startupProbe covers it with a
+{{ mul .Values.startupProbe.periodSeconds .Values.startupProbe.failureThreshold }}s budget; readiness and liveness are not evaluated by kubelet until
+startup succeeds, which is why neither carries an initialDelaySeconds.
+
+--------------------------------------------------------------------------
+ROLLBACK
+--------------------------------------------------------------------------
+There is no separate rollback mechanism, by design. Revert the image.digest
+change in charts/echo-pong/values-<env>.yaml in Git and let Argo CD
+reconcile (or sync manually for production). Git history IS the release
+history.
+
+Verify:
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ include "echo-pong.fullname" . }}
+  kubectl -n {{ .Release.Namespace }} get externalsecret {{ include "echo-pong.fullname" . }}

@@ -1,0 +1,74 @@
+{{- if .Values.networkPolicy.enabled }}
+# -----------------------------------------------------------------------------
+# Default-deny NetworkPolicy with explicit allowances.
+# -----------------------------------------------------------------------------
+# Selecting the pod and listing both policyTypes is what makes this deny-by-
+# default: everything not matched by a rule below is dropped in both
+# directions.
+#
+# HONEST SCOPE (see chart README):
+#   * Ingress from the ALB is expressed as an ipBlock, because with
+#     target-type: ip the ALB dials Pod IPs from its own VPC ENIs. That source
+#     is not a pod, so pod/namespace selectors can never match it. The rule is
+#     therefore only as tight as the CIDR list — it does NOT prove "the ALB".
+#   * East-West traffic IS properly restricted: no other pod may connect
+#     unless it matches extraIngressFrom.
+#   * None of this is enforced unless the cluster actually runs a policy
+#     engine (VPC CNI network policy agent, Calico, Cilium). Without one the
+#     object is inert.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "echo-pong.fullname" . }}
+  labels:
+    {{- include "echo-pong.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "echo-pong.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    {{- with .Values.networkPolicy.albSourceCidrs }}
+    # ALB -> Pod IP (and any other in-VPC caller in these CIDRs).
+    - from:
+        {{- range . }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ $.Values.app.port }}
+    {{- end }}
+    {{- with .Values.networkPolicy.extraIngressFrom }}
+    - from:
+        {{- toYaml . | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ $.Values.app.port }}
+    {{- end }}
+  egress:
+    {{- if .Values.networkPolicy.egress.dns }}
+    # The only allowance. The app itself performs no outbound connections at
+    # all: the bearer token arrives as a file written by ESO (ESO's own pod
+    # makes the AWS call), and image pulls are done by the kubelet on the node,
+    # which pod NetworkPolicy does not govern.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    {{- end }}
+    {{- with .Values.networkPolicy.egress.extraEgress }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- if and (not .Values.networkPolicy.egress.dns) (not .Values.networkPolicy.egress.extraEgress) }}
+    # Explicit empty list = all egress denied. Correct for this app.
+    []
+    {{- end }}
+{{- end }}

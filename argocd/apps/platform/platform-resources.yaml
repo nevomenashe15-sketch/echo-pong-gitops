@@ -1,0 +1,105 @@
+---
+# =============================================================================
+# Platform custom resources owned by THIS repo
+# =============================================================================
+# Everything here is a CR of an operator installed at sync wave -10, so it must
+# land afterwards (wave 0). Two Applications, split by lifecycle:
+#
+#   external-secrets-config  the cluster-scoped ClusterSecretStore the app
+#                            chart's ExternalSecret references
+#   karpenter-resources      the NodePool / EC2NodeClass objects — these are
+#                            GitOps-owned by design; Terraform only creates
+#                            their IAM prerequisites
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: external-secrets-config
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://github.com/nevomenashe15-sketch/echo-pong-gitops.git
+    targetRevision: main
+    path: platform/external-secrets
+    directory:
+      recurse: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: external-secrets
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+      # The ClusterSecretStore cannot be created until ESO's CRDs exist. With
+      # sync waves this is already ordered, but the retry makes a cold cluster
+      # bootstrap converge instead of failing once and stopping.
+    retry:
+      limit: 10
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
+---
+# -----------------------------------------------------------------------------
+# Karpenter NodePool / EC2NodeClass, one Application per environment.
+# -----------------------------------------------------------------------------
+# selfHeal is ON: these objects directly control what compute exists, and drift
+# here is a cost and availability problem.
+# prune is ON but note the consequence: deleting a NodePool from Git causes
+# Karpenter to drain and terminate every node it owns. That is correct GitOps
+# behaviour and it is also a cluster-wide event — hence the explicit call-out
+# in the repo README.
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: karpenter-resources
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  goTemplate: true
+  goTemplateOptions:
+    - missingkey=error
+  generators:
+    - list:
+        elements:
+          - env: dev
+            server: https://kubernetes.default.svc
+          - env: staging
+            server: https://kubernetes.default.svc
+          - env: prod
+            server: https://kubernetes.default.svc
+  template:
+    metadata:
+      name: 'karpenter-resources-{{ .env }}'
+      finalizers:
+        - resources-finalizer.argocd.argoproj.io
+    spec:
+      project: platform
+      source:
+        repoURL: https://github.com/nevomenashe15-sketch/echo-pong-gitops.git
+        targetRevision: main
+        path: 'platform/karpenter/{{ .env }}'
+      destination:
+        server: '{{ .server }}'
+        namespace: karpenter
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=false
+          - ServerSideApply=true
+        retry:
+          limit: 10
+          backoff:
+            duration: 30s
+            factor: 2
+            maxDuration: 5m

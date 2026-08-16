@@ -1,0 +1,82 @@
+---
+# =============================================================================
+# AppProject: echo-pong (the application itself)
+# =============================================================================
+# Scoped as tightly as the app allows:
+#   * exactly one source repository — this one;
+#   * exactly the three application namespaces;
+#   * clusterResourceWhitelist: [] — the app owns NO cluster-scoped object.
+#     Namespaces are created by Argo CD's CreateNamespace sync option with
+#     managedNamespaceMetadata, not by a Namespace manifest in the chart, which
+#     is what lets this list stay empty.
+#   * an explicit namespaceResourceWhitelist: a compromised or mistaken chart
+#     change cannot introduce a Role/RoleBinding/CronJob into these namespaces.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: echo-pong
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-20"
+spec:
+  description: Restricted project for the echo-pong application workloads
+
+  sourceRepos:
+    - https://github.com/nevomenashe15-sketch/echo-pong-gitops.git
+
+  destinations:
+    - namespace: echo-pong-dev
+      server: https://kubernetes.default.svc
+    - namespace: echo-pong-staging
+      server: https://kubernetes.default.svc
+    - namespace: echo-pong-prod
+      server: https://kubernetes.default.svc
+
+  # No cluster-scoped resources whatsoever.
+  clusterResourceWhitelist: []
+
+  namespaceResourceWhitelist:
+    - group: apps
+      kind: Deployment
+    - group: ""
+      kind: Service
+    - group: ""
+      kind: ServiceAccount
+    - group: autoscaling
+      kind: HorizontalPodAutoscaler
+    - group: policy
+      kind: PodDisruptionBudget
+    - group: networking.k8s.io
+      kind: NetworkPolicy
+    - group: networking.k8s.io
+      kind: Ingress
+    - group: external-secrets.io
+      kind: ExternalSecret
+    - group: external-secrets.io
+      kind: SecretStore
+
+  # Belt and braces: the chart never creates a Secret, and it must not be able
+  # to. The Secret object in these namespaces is created by ESO, which is not
+  # an Argo CD-managed resource, so Argo CD never needs write access to it.
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: Secret
+    - group: rbac.authorization.k8s.io
+      kind: Role
+    - group: rbac.authorization.k8s.io
+      kind: RoleBinding
+
+  roles:
+    - name: readonly
+      description: Read-only access for reviewers and on-call
+      policies:
+        - p, proj:echo-pong:readonly, applications, get, echo-pong/*, allow
+      groups: []
+    - name: prod-syncer
+      description: >-
+        May trigger a sync of the production Application, but cannot change it.
+        Intended for the release approver after a promotion PR has merged.
+      policies:
+        - p, proj:echo-pong:prod-syncer, applications, get, echo-pong/*, allow
+        - p, proj:echo-pong:prod-syncer, applications, sync, echo-pong/echo-pong-prod, allow
+      groups: []

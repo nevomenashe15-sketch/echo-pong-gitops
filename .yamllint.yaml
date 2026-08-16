@@ -1,0 +1,39 @@
+---
+# yamllint configuration for echo-pong-gitops.
+#
+# Helm TEMPLATES are excluded: they are Go templates, not YAML, and yamllint
+# cannot parse `{{- if ... }}` control flow. They are validated instead by
+# `helm lint` + `helm template` (which produces real YAML) and then by
+# `kubeconform` against that rendered output. Everything that IS plain YAML in
+# this repo — values files, Argo CD manifests, Karpenter CRs, platform
+# manifests — is linted here.
+extends: default
+
+ignore: |
+  charts/*/templates/
+  charts/*/charts/
+  *.rendered.yaml
+  .rendered/
+
+rules:
+  line-length:
+    max: 140
+    level: warning
+    allow-non-breakable-words: true
+  # Long AWS ARNs, digests and annotation values legitimately exceed the
+  # default; wrapping them would break the values they encode.
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: enable
+  document-start:
+    present: true
+  truthy:
+    check-keys: false
+  indentation:
+    spaces: 2
+    indent-sequences: true
+  braces:
+    max-spaces-inside: 1
+  octal-values:
+    forbid-implicit-octal: false
+    forbid-explicit-octal: false

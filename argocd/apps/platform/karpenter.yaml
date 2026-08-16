@@ -1,0 +1,92 @@
+---
+# =============================================================================
+# Platform add-on: Karpenter (the controller)
+# =============================================================================
+# Ownership boundary, per the repo split:
+#   Terraform (sibling repo) creates ONLY Karpenter's AWS prerequisites — the
+#   controller IAM role (echo-pong-<env>-karpenter-controller), the node IAM
+#   role and instance profile (echo-pong-<env>-karpenter-node), the SQS
+#   interruption queue, the EventBridge rules, and the subnet/security-group
+#   discovery tags.
+#   This repo installs the controller (here) and owns every Karpenter CUSTOM
+#   RESOURCE (platform/karpenter/, applied by karpenter-resources.yaml).
+#   Terraform must never create a NodePool or EC2NodeClass.
+#
+# The controller itself runs on the always-on managed node group, never on
+# Karpenter-provisioned capacity — a node autoscaler that can deprovision its
+# own node cannot recover the cluster.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: karpenter
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: public.ecr.aws/karpenter
+    chart: karpenter
+    targetRevision: 1.0.8
+    helm:
+      releaseName: karpenter
+      values: |
+        settings:
+          clusterName: echo-pong-prod
+          clusterEndpoint: ""
+          interruptionQueue: echo-pong-prod-karpenter
+        serviceAccount:
+          create: true
+          name: karpenter
+          # EKS Pod Identity association created by Terraform against the
+          # echo-pong-prod-karpenter-controller role. IRSA fallback:
+          #   annotations:
+          #     eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/echo-pong-prod-karpenter-controller
+          annotations: {}
+        replicas: 2
+        controller:
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+        # Hard-pinned to the system node group. This is one of the very few
+        # places a REQUIRED nodeSelector is correct: it is the constraint that
+        # stops Karpenter from being scheduled onto a node it manages.
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          echo-pong.io/nodegroup: system
+        tolerations:
+          - key: CriticalAddonsOnly
+            operator: Exists
+            effect: NoSchedule
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              - topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    app.kubernetes.io/name: karpenter
+        podDisruptionBudget:
+          maxUnavailable: 1
+        logLevel: info
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: karpenter
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

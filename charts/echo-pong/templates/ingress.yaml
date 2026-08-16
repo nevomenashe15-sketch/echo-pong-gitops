@@ -1,0 +1,91 @@
+{{- if .Values.ingress.enabled }}
+{{- $alb := .Values.ingress.alb -}}
+{{- $listenPorts := list -}}
+{{- if $alb.httpEnabled }}{{ $listenPorts = append $listenPorts (dict "HTTP" 80) }}{{ end -}}
+{{- if $alb.httpsEnabled }}{{ $listenPorts = append $listenPorts (dict "HTTPS" 443) }}{{ end -}}
+{{- if not $listenPorts }}{{ fail "ingress.alb: at least one of httpEnabled / httpsEnabled must be true" }}{{ end -}}
+{{- if and $alb.httpsEnabled (not $alb.certificateArn) }}{{ fail "ingress.alb.certificateArn is required when httpsEnabled is true" }}{{ end -}}
+{{- if not .Values.ingress.host }}{{ fail "ingress.host is required when ingress.enabled is true" }}{{ end -}}
+# -----------------------------------------------------------------------------
+# Ingress -> AWS Application Load Balancer
+# -----------------------------------------------------------------------------
+# This object is DECLARATIVE CONFIGURATION consumed by the AWS Load Balancer
+# Controller. It is not a runtime proxy and it is not a hop in the data path.
+#
+#   Logical/Kubernetes view:  Ingress -> ClusterIP Service -> Pods
+#   Effective AWS data path:  CloudFront (WAF) -> ALB -> Pod IP
+#
+# With target-type: ip the controller registers Pod IPs directly in the target
+# group, so packets go ALB ENI -> Pod ENI. The Service is how the controller
+# discovers which pods to register; no traffic is proxied through it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "echo-pong.fullname" . }}
+  labels:
+    {{- include "echo-pong.labels" . | nindent 4 }}
+  annotations:
+    alb.ingress.kubernetes.io/scheme: {{ $alb.scheme }}
+    alb.ingress.kubernetes.io/target-type: {{ $alb.targetType }}
+    alb.ingress.kubernetes.io/backend-protocol: HTTP
+    alb.ingress.kubernetes.io/listen-ports: {{ toJson $listenPorts | quote }}
+    {{- if and $alb.httpEnabled $alb.httpsEnabled }}
+    # Port 80 exists only to answer with a permanent redirect; plaintext is
+    # never served to a client.
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    {{- end }}
+    {{- if $alb.httpsEnabled }}
+    alb.ingress.kubernetes.io/certificate-arn: {{ $alb.certificateArn | quote }}
+    alb.ingress.kubernetes.io/ssl-policy: {{ $alb.sslPolicy | quote }}
+    {{- end }}
+    # /health is public and unauthenticated by design, which is exactly what
+    # an ALB health check needs — it cannot present a bearer token.
+    alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
+    alb.ingress.kubernetes.io/healthcheck-path: {{ $alb.healthcheckPath | quote }}
+    alb.ingress.kubernetes.io/healthcheck-port: traffic-port
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: {{ $alb.healthcheckIntervalSeconds | quote }}
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: {{ $alb.healthcheckTimeoutSeconds | quote }}
+    alb.ingress.kubernetes.io/healthy-threshold-count: {{ $alb.healthyThresholdCount | quote }}
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: {{ $alb.unhealthyThresholdCount | quote }}
+    alb.ingress.kubernetes.io/success-codes: {{ $alb.successCodes | quote }}
+    # Deregistration delay must be SHORTER than preStop sleep +
+    # terminationGracePeriodSeconds, otherwise the process is already dead
+    # while the target group still considers the Pod IP drainable.
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds={{ $alb.deregistrationDelaySeconds }}
+    alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds={{ $alb.idleTimeoutSeconds }},routing.http.drop_invalid_header_fields.enabled=true
+    {{- with $alb.groupName }}
+    alb.ingress.kubernetes.io/group.name: {{ . | quote }}
+    {{- end }}
+    {{- with $alb.groupOrder }}
+    alb.ingress.kubernetes.io/group.order: {{ . | quote }}
+    {{- end }}
+    {{- with $alb.wafv2AclArn }}
+    # The Web ACL is DEFINED by the sibling Terraform repo. It is ASSOCIATED
+    # here, because the ALB does not exist until this Ingress is reconciled by
+    # the controller. Terraform must never also associate it — one owner only.
+    alb.ingress.kubernetes.io/wafv2-acl-arn: {{ . | quote }}
+    {{- end }}
+    {{- with $alb.extraAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    {{- with .Values.ingress.extraAnnotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  {{- with .Values.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.ingress.path }}
+            pathType: {{ .Values.ingress.pathType }}
+            backend:
+              service:
+                name: {{ include "echo-pong.fullname" . }}
+                port:
+                  number: {{ .Values.service.port }}
+{{- end }}

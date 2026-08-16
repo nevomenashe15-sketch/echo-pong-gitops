@@ -1,0 +1,56 @@
+---
+# NodePool — dev, arm64, spot-first.
+#
+# Dev is a single pool on purpose. There is no amd64 fallback pool here: dev
+# does not need to survive a Graviton capacity shortage, and the absence of a
+# fallback is itself useful — if arm64 capacity is ever genuinely unobtainable,
+# dev finds out first, loudly, while production still has somewhere to land.
+#
+# Spot-first with an on-demand fallback: dev workloads are interruptible by
+# definition, and this is where the cheapest capacity belongs.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: echo-pong-dev-arm64
+spec:
+  weight: 100
+  template:
+    metadata:
+      labels:
+        echo-pong.io/nodegroup: app
+        echo-pong.io/arch-pool: arm64
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: echo-pong-dev
+      expireAfter: 168h
+      terminationGracePeriod: 1h
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["spot", "on-demand"]
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["c7g", "m7g", "c8g"]
+        - key: karpenter.k8s.aws/instance-size
+          operator: In
+          values: ["medium", "large"]
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+  limits:
+    cpu: "8"
+    memory: 32Gi
+  disruption:
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    # Aggressive in dev — idle capacity should disappear quickly.
+    consolidateAfter: 1m
+    budgets:
+      - nodes: "50%"

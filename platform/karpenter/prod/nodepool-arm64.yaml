@@ -1,0 +1,109 @@
+---
+# =============================================================================
+# NodePool — production, arm64 (Graviton) PRIMARY
+# =============================================================================
+# Higher `weight` than the amd64 fallback pool, so Karpenter prefers Graviton
+# capacity whenever it can get it. This is the pool that makes the app's SOFT
+# arm64 node affinity actually mean something: a pod preference alone cannot
+# create arm64 nodes, only a NodePool that offers them can.
+apiVersion: karpenter.sh/v1
+kind: NodePool
+metadata:
+  name: echo-pong-prod-arm64
+spec:
+  # Preferred over the amd64 pool. Karpenter tries the highest-weight pool
+  # that can satisfy the pod first, and falls through on capacity errors.
+  weight: 100
+
+  template:
+    metadata:
+      labels:
+        echo-pong.io/nodegroup: app
+        echo-pong.io/arch-pool: arm64
+    spec:
+      nodeClassRef:
+        group: karpenter.k8s.aws
+        kind: EC2NodeClass
+        name: echo-pong-prod
+
+      # Nodes are replaced (not patched in place) at most every 14 days, which
+      # is how AL2023 security updates actually reach the fleet given the
+      # `al2023@latest` AMI alias.
+      expireAfter: 336h
+
+      # Upper bound on how long a node may take to drain before Karpenter
+      # forcibly terminates it. Without this, a misconfigured PDB can block a
+      # security-driven node replacement indefinitely. 24h is long enough that
+      # it never fires in normal operation and short enough to bound the worst
+      # case.
+      terminationGracePeriod: 24h
+
+      requirements:
+        - key: kubernetes.io/arch
+          operator: In
+          values: ["arm64"]
+        - key: kubernetes.io/os
+          operator: In
+          values: ["linux"]
+        # ON-DEMAND ONLY in production, deliberately.
+        # Spot is a documented, NOT-enabled toggle: add "spot" to this list to
+        # let Karpenter mix in interruptible capacity. Before doing so, be
+        # aware that echo-pong has no SIGTERM handling — a 2-minute spot
+        # interruption notice still ends with the process being killed
+        # abruptly, so every spot reclaim is a small number of dropped
+        # requests. Enable spot for staging/dev first; for production it is a
+        # cost-vs-error-rate decision that needs the graceful-shutdown fix in
+        # the application first.
+        - key: karpenter.sh/capacity-type
+          operator: In
+          values: ["on-demand"]
+        # Current-generation Graviton families. Compute (c), general (m) and
+        # memory (r) are all allowed so Karpenter can bin-pack across whatever
+        # is actually available in the AZ, rather than being pinned to one
+        # family that can run out.
+        - key: karpenter.k8s.aws/instance-family
+          operator: In
+          values: ["c7g", "m7g", "r7g", "c8g", "m8g"]
+        # Cap node size. This app's pods are tiny; without an upper bound
+        # Karpenter may consolidate everything onto one very large node, at
+        # which point a single node event is a full outage — and the strict
+        # hostname topology spread would fight it anyway.
+        - key: karpenter.k8s.aws/instance-size
+          operator: In
+          values: ["medium", "large", "xlarge"]
+        # Multi-AZ. Must match the AZs the discovery-tagged private subnets
+        # live in, and must be >= the number of zone-spread domains the app
+        # needs.
+        - key: topology.kubernetes.io/zone
+          operator: In
+          values: ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+
+  # Hard ceiling on what this pool may ever provision. A runaway HPA or a
+  # scheduling bug stops at a bounded bill instead of an unbounded one.
+  limits:
+    cpu: "48"
+    memory: 192Gi
+
+  disruption:
+    # Consolidate both empty nodes and underutilised ones. For a stateless
+    # service with a PDB and maxUnavailable: 0 rollouts this is safe and is
+    # where most of the Graviton cost saving actually comes from.
+    consolidationPolicy: WhenEmptyOrUnderutilized
+    # Wait for the workload to settle before acting, so an HPA scale-up
+    # followed by a scale-down does not trigger immediate node churn.
+    consolidateAfter: 5m
+    budgets:
+      # Baseline: never voluntarily disrupt more than 10% of this pool's nodes
+      # at once. Combined with the app's PDB (minAvailable: 2) this bounds how
+      # much of the fleet can be in motion simultaneously.
+      - nodes: "10%"
+      # Freeze voluntary disruption during business hours. Karpenter will still
+      # replace nodes for involuntary reasons (spot interruption, health), but
+      # it will not choose to churn capacity while people are watching traffic.
+      # Remove this budget if 24/7 consolidation savings matter more.
+      - nodes: "0"
+        schedule: "0 8 * * mon-fri"
+        duration: 10h
+        reasons:
+          - Underutilized
+          - Drifted

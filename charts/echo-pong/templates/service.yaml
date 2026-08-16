@@ -1,0 +1,22 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "echo-pong.fullname" . }}
+  labels:
+    {{- include "echo-pong.labels" . | nindent 4 }}
+  {{- with .Values.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # ClusterIP only — the app is never exposed by a NodePort or a
+  # service-type LoadBalancer. Internet exposure happens exclusively through
+  # CloudFront -> WAF -> ALB, and the ALB is created from the Ingress object.
+  type: {{ .Values.service.type }}
+  ports:
+    - name: http
+      port: {{ .Values.service.port }}
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "echo-pong.selectorLabels" . | nindent 4 }}

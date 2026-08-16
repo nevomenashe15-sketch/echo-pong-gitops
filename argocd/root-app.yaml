@@ -1,0 +1,55 @@
+---
+# =============================================================================
+# Root "app of apps"
+# =============================================================================
+# This is the ONE object applied by hand (or by the Terraform bootstrap, as the
+# single sanctioned Terraform -> Kubernetes touch, immediately after Argo CD
+# itself is installed). Everything else in the cluster is created by Argo CD
+# from this repository.
+#
+# It watches the whole argocd/ directory recursively, which means it manages:
+#   argocd/projects/       AppProjects (sync wave -20, so they exist first)
+#   argocd/apps/platform/  platform add-on Applications (wave -10 / 0)
+#   argocd/apps/echo-pong/ the application itself (wave 10)
+#   argocd/root-app.yaml   itself — self-management is intentional, so a change
+#                          to the root app is also a reviewed Git change
+#
+# The root app is in the `default` AppProject because it creates Applications
+# and AppProjects, which the two restricted projects deliberately do not allow.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/nevomenashe15-sketch/echo-pong-gitops.git
+    targetRevision: main
+    path: argocd
+    directory:
+      recurse: true
+      include: '{*.yaml,**/*.yaml}'
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated:
+      # prune ON here is safe and desirable: the only things this app owns are
+      # Application/AppProject definitions, so pruning means "an Application
+      # removed from Git stops being reconciled". Deleting an Application does
+      # cascade to its workloads via the resources-finalizer, which is why
+      # every child Application below is added and removed by PR, never ad hoc.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ApplyOutOfSyncOnly=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

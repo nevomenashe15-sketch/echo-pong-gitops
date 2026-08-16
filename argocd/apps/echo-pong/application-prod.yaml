@@ -1,0 +1,101 @@
+---
+# =============================================================================
+# Application: echo-pong PRODUCTION — protected, manual sync
+# =============================================================================
+# There is NO `syncPolicy.automated` block below, and that omission is the
+# whole point of this file.
+#
+# Release path:
+#   1. CI builds, scans and signs an image, and opens a promotion PR that
+#      changes exactly one line: image.digest in values-prod.yaml.
+#   2. The PR is reviewed and merged (branch protection + required reviewers on
+#      the echo-pong-gitops repository enforce this, not Argo CD).
+#   3. Argo CD detects the Application as OutOfSync but does NOT act.
+#   4. A human (or the `prod-syncer` project role) triggers the sync.
+#
+# Rollback is the same path with the previous digest — `git revert` the
+# promotion commit, then sync. There is intentionally no second rollback
+# mechanism: a mechanism that can restore a state which is not in Git would
+# make Git stop being the source of truth.
+#
+# WHY NOT `automated: {selfHeal: true, prune: false}`?
+#   selfHeal would revert live drift to merged Git state, which sounds
+#   harmless, and mostly is. Two reasons it is off anyway:
+#     * During an incident the fastest safe action is often `kubectl scale` or
+#       `kubectl -n echo-pong-prod delete pod`. With selfHeal on, an operator
+#       has to remember to disable it first, under pressure, or watch their
+#       mitigation be undone within ~3 minutes.
+#     * selfHeal makes the cluster change without any human deciding that NOW
+#       is a good moment. Production's guard rail is "a person chooses the
+#       moment", and selfHeal removes exactly that.
+#   The cost is that genuine drift persists until someone notices; Argo CD
+#   still reports the Application as OutOfSync, which is the alert.
+#
+# WHY NOT `prune: true`?
+#   Pruning deletes live objects that are absent from Git. In production that
+#   includes anything applied out-of-band during an incident — a debug pod, a
+#   temporary NetworkPolicy exception, a manually patched HPA. Automatic,
+#   unattended deletion of those, potentially mid-incident, is a worse failure
+#   mode than a stale object. Pruning still happens on a manual sync when
+#   explicitly requested.
+#
+# FUTURE (not built, deliberately): AppProject `syncWindows` could additionally
+# deny syncs outside a change window. Left out because with manual-only sync
+# the window is already "whenever the approver chooses", and an unused
+# scheduling mechanism is one more thing to misconfigure.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: echo-pong-prod
+  namespace: argocd
+  labels:
+    echo-pong.io/environment: prod
+  annotations:
+    argocd.argoproj.io/sync-wave: "10"
+    # Surface the manual-only contract in the UI as well as in this file.
+    notifications.argoproj.io/subscribe.on-sync-status-unknown.slack: ""
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: echo-pong
+  source:
+    repoURL: https://github.com/nevomenashe15-sketch/echo-pong-gitops.git
+    targetRevision: main
+    path: charts/echo-pong
+    helm:
+      releaseName: echo-pong
+      valueFiles:
+        - values.yaml
+        - values-prod.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: echo-pong-prod
+  # syncPolicy WITHOUT `automated`: options and retry behaviour apply to the
+  # manually triggered sync; nothing here starts a sync on its own.
+  syncPolicy:
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted
+        echo-pong.io/environment: prod
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      # Never prune implicitly, even inside a manual sync, unless the operator
+      # explicitly asks for it in that sync.
+      - PruneLast=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
+  # Ignore the replica count the HPA owns, so a scaled-out production
+  # deployment is not reported as drift against the chart's baseline.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas
+  revisionHistoryLimit: 10

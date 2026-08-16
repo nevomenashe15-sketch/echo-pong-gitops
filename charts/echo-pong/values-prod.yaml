@@ -1,0 +1,115 @@
+---
+# =============================================================================
+# echo-pong — PRODUCTION overlay
+#   helm ... -f values.yaml -f values-prod.yaml
+#
+# Argo CD: NO automated.prune, NO automated.selfHeal. Production syncs only
+# after a reviewed, merged pull request to this file plus an explicit sync.
+# See argocd/application-echo-pong-prod.yaml and the repo README.
+#
+# Changing image.digest below IS the production release.
+# Reverting image.digest below IS the production rollback.
+# =============================================================================
+environment: prod
+
+replicaCount: 3
+
+image:
+  repository: 000000000000.dkr.ecr.eu-west-1.amazonaws.com/echo-pong
+  # THE approved, immutable production artifact. Only ever changed by a
+  # reviewed promotion PR carrying the scan/signature evidence for this exact
+  # digest. Placeholder until the first real release is promoted.
+  digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  pullPolicy: IfNotPresent
+
+# minReplicas 3 is deliberately ONE ABOVE podDisruptionBudget.minAvailable
+# (2). At the floor the PDB still allows exactly one voluntary eviction, so
+# node drains, cluster upgrades and Karpenter consolidation can make progress
+# instead of deadlocking. maxReplicas 6 matches the capacity envelope the
+# infrastructure repo sizes the node groups for.
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+  maxUnavailable: ""
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Strict on BOTH axes in production.
+#   zone     DoNotSchedule — losing an AZ must not be able to take the whole
+#            service with it; a Pending pod is a louder, safer failure than a
+#            silently AZ-concentrated deployment.
+#   hostname DoNotSchedule — Karpenter will happily consolidate onto one large
+#            node otherwise, at which point a single spot reclaim or node
+#            replacement is a full outage.
+# Safe here because Karpenter provisions the extra node on demand, and
+# matchLabelKeys: [pod-template-hash] scopes the skew calculation to a single
+# ReplicaSet so the maxSurge pod of a rollout cannot deadlock against the
+# outgoing revision.
+topologySpreadConstraints:
+  enabled: true
+  zone:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: DoNotSchedule
+  hostname:
+    enabled: true
+    maxSkew: 1
+    whenUnsatisfiable: DoNotSchedule
+  matchLabelKeys:
+    - pod-template-hash
+
+nodeAffinity:
+  preferArm64: true
+  arm64Weight: 90
+
+externalSecret:
+  enabled: true
+  refreshInterval: 1h
+  remoteRef:
+    key: echo-pong/prod/token
+
+networkPolicy:
+  enabled: true
+  # Narrowed to the two public/ALB subnet CIDRs rather than the whole VPC.
+  # This is still coarse — see the chart README on what an ipBlock rule can
+  # and cannot prove about the caller.
+  albSourceCidrs:
+    - 10.30.0.0/20
+    - 10.30.16.0/20
+  egress:
+    dns: true
+    extraEgress: []
+
+ingress:
+  enabled: true
+  className: alb
+  host: echo-pong.example.com
+  alb:
+    scheme: internet-facing
+    targetType: ip
+    groupName: echo-pong-prod
+    certificateArn: arn:aws:acm:eu-west-1:000000000000:certificate/00000000-0000-0000-0000-000000000000
+    sslPolicy: ELBSecurityPolicyTLS13-1-2-2021-06
+    httpsEnabled: true
+    httpEnabled: true
+    healthcheckPath: /health
+    deregistrationDelaySeconds: 10
+    # Regional Web ACL enforcing the CloudFront origin-verification header.
+    # Defined by the sibling Terraform repo; associated here because the ALB
+    # only exists once the AWS Load Balancer Controller reconciles this
+    # Ingress. Exactly one owner for the association — not Terraform.
+    wafv2AclArn: arn:aws:wafv2:eu-west-1:000000000000:regional/webacl/echo-pong-prod/00000000-0000-0000-0000-000000000000
+    extraAnnotations:
+      alb.ingress.kubernetes.io/tags: Environment=prod,Application=echo-pong,ManagedBy=argocd

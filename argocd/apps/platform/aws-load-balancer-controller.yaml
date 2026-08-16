@@ -1,0 +1,94 @@
+---
+# =============================================================================
+# Platform add-on: AWS Load Balancer Controller
+# =============================================================================
+# Reconciles this repo's Ingress objects into real ALBs with IP target mode.
+# Without it, the Ingress is inert YAML and nothing is reachable.
+#
+# Ownership boundary: the sibling Terraform repo creates the IAM role and the
+# EKS Pod Identity association for the ServiceAccount below (and the VPC/subnet
+# tags the controller discovers subnets by). Terraform does NOT install the
+# controller and does not create this ServiceAccount — Argo CD does, from here.
+#
+# Sync wave -10: must be running before any Application that creates an Ingress.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: aws-load-balancer-controller
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: platform
+  source:
+    repoURL: https://aws.github.io/eks-charts
+    chart: aws-load-balancer-controller
+    # Pinned. An unpinned platform add-on is an unreviewed change to the thing
+    # that fronts production traffic.
+    targetRevision: 1.9.2
+    helm:
+      releaseName: aws-load-balancer-controller
+      values: |
+        clusterName: echo-pong-prod
+        region: eu-west-1
+        vpcId: vpc-00000000000000000
+        serviceAccount:
+          create: true
+          name: aws-load-balancer-controller
+          # No eks.amazonaws.com/role-arn annotation: authorisation comes from
+          # the EKS Pod Identity association Terraform creates against this
+          # ServiceAccount. If the controller version in use ever turns out not
+          # to support Pod Identity, the IRSA fallback is to add:
+          #   annotations:
+          #     eks.amazonaws.com/role-arn: arn:aws:iam::000000000000:role/echo-pong-prod-alb-controller
+          annotations: {}
+        # Two replicas with leader election: this controller is in the path of
+        # every Ingress change, and a single replica makes a node drain a
+        # config-freeze.
+        replicaCount: 2
+        podDisruptionBudget:
+          maxUnavailable: 1
+        enableShield: false
+        enableWaf: false
+        # WAFv2 association is done through the Ingress annotation in the
+        # echo-pong chart, so the controller must be allowed to manage it.
+        enableWafv2: true
+        defaultTargetType: ip
+        # Run on the always-on arm64 managed node group rather than on
+        # Karpenter capacity: the controller must not depend on the autoscaler
+        # it may itself be needed to recover.
+        nodeSelector:
+          kubernetes.io/arch: arm64
+          echo-pong.io/nodegroup: system
+        tolerations:
+          - key: CriticalAddonsOnly
+            operator: Exists
+            effect: NoSchedule
+        resources:
+          requests:
+            cpu: 50m
+            memory: 96Mi
+          limits:
+            cpu: 300m
+            memory: 256Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: kube-system
+  syncPolicy:
+    automated:
+      # Platform add-ons self-heal: drift in the thing that terminates
+      # production traffic is not something to leave for someone to notice.
+      # prune is safe because the Helm release fully owns its own objects.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=false
+      - ServerSideApply=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m

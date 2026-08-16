@@ -1,0 +1,33 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- if and .Values.podDisruptionBudget.minAvailable .Values.podDisruptionBudget.maxUnavailable }}
+{{- fail "podDisruptionBudget: set exactly one of minAvailable / maxUnavailable, not both" }}
+{{- end }}
+{{- if and (not .Values.podDisruptionBudget.minAvailable) (not .Values.podDisruptionBudget.maxUnavailable) }}
+{{- fail "podDisruptionBudget: one of minAvailable / maxUnavailable must be set" }}
+{{- end }}
+# Guards VOLUNTARY disruption only — node drains, Karpenter consolidation,
+# cluster upgrades, `kubectl drain`. It does not protect against a node dying,
+# nor against a bad rollout (maxUnavailable: 0 in the Deployment strategy is
+# what covers that).
+#
+# minAvailable is an absolute number so the "at least 2 ready replicas"
+# requirement holds even if the HPA has scaled down to its floor. That floor
+# (autoscaling.minReplicas) must therefore be > minAvailable, otherwise
+# consolidation and node drains block forever.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "echo-pong.fullname" . }}
+  labels:
+    {{- include "echo-pong.labels" . | nindent 4 }}
+spec:
+  {{- with .Values.podDisruptionBudget.minAvailable }}
+  minAvailable: {{ . }}
+  {{- end }}
+  {{- with .Values.podDisruptionBudget.maxUnavailable }}
+  maxUnavailable: {{ . }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "echo-pong.selectorLabels" . | nindent 6 }}
+{{- end }}
