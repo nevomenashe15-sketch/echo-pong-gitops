@@ -1,21 +1,39 @@
 ---
-# EC2NodeClass — staging. Same shape as production so staging genuinely
-# rehearses it; only the cluster/role names and tags differ.
+# EC2NodeClass — staging.
+#
+# IMPORTANT: staging shares dev's actual EKS cluster. echo-pong-infrastructure
+# only ever provisions envs/dev and envs/prod (confirmed: `ls envs/` there has
+# no `staging` directory) -- there is no separate "echo-pong-staging" cluster,
+# VPC, or IAM role anywhere in AWS. argocd/apps/echo-pong/applicationset.yaml
+# confirms this at the Argo CD level too: both dev and staging Applications
+# use the identical `server: https://kubernetes.default.svc` destination,
+# i.e. whichever cluster is running that Argo CD instance -- dev's.
+#
+# role and discovery tags below therefore intentionally match DEV's real
+# Terraform-created values (modules/eks/nodes.tf names the role
+# "${cluster_name}-karpenter-node" = "echo-pong-dev-karpenter-node";
+# modules/vpc/main.tf tags subnets/SGs `karpenter.sh/discovery = cluster_name`
+# = "echo-pong-dev"), NOT "echo-pong-staging" -- that name was never created
+# by any Terraform root module, so Karpenter could never resolve it. Staging
+# still gets its OWN EC2NodeClass/NodePool objects (this file), separate from
+# dev's, so it can rehearse prod-shaped instance-family/spot/limits settings
+# on dev's actual node capacity -- it just launches into dev's real
+# subnets/security-groups/IAM role, because that's the only place it can.
 apiVersion: karpenter.k8s.aws/v1
 kind: EC2NodeClass
 metadata:
   name: echo-pong-staging
 spec:
-  role: echo-pong-staging-karpenter-node
+  role: echo-pong-dev-karpenter-node
   amiSelectorTerms:
     - alias: al2023@latest
   subnetSelectorTerms:
     - tags:
-        karpenter.sh/discovery: echo-pong-staging
+        karpenter.sh/discovery: echo-pong-dev
         kubernetes.io/role/internal-elb: "1"
   securityGroupSelectorTerms:
     - tags:
-        karpenter.sh/discovery: echo-pong-staging
+        karpenter.sh/discovery: echo-pong-dev
   metadataOptions:
     httpEndpoint: enabled
     httpProtocolIPv6: disabled
