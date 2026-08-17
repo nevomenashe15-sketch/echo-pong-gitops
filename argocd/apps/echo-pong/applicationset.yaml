@@ -82,3 +82,13 @@ spec:
             duration: 30s
             factor: 2
             maxDuration: 5m
+      # Ignore the replica count the HPA owns, so a scaled-out dev/staging
+      # deployment is not reported as drift against the chart's baseline.
+      # Missing this (while application-prod.yaml has it) meant selfHeal
+      # would periodically force spec.replicas back down, fighting the HPA
+      # in staging whenever autoscaling.enabled scales it above baseline.
+      ignoreDifferences:
+        - group: apps
+          kind: Deployment
+          jsonPointers:
+            - /spec/replicas

@@ -318,10 +318,18 @@ identical placement in the normal case and degrades to "runs on amd64, costs a
 little more" in the bad case.
 
 This only means something because a **matching amd64 Karpenter NodePool
-exists** (`platform/karpenter/*/nodepool-amd64-fallback.yaml`, lower `weight`).
-A pod preference cannot create nodes. With an arm64-only NodePool the soft
-preference would be decorative — the scheduler would have nowhere else to put
-the pod and Karpenter no pool able to build one.
+exists** — in **staging and prod**
+(`platform/karpenter/{staging,prod}/nodepool-amd64-fallback.yaml`, lower
+`weight`). A pod preference cannot create nodes. With an arm64-only NodePool
+the soft preference would be decorative — the scheduler would have nowhere
+else to put the pod and Karpenter no pool able to build one.
+
+**Dev is the deliberate exception**: it has only `nodepool-arm64.yaml`, no
+fallback pool at all (see that file's own header comment). In dev the soft
+preference genuinely is decorative by design — a Graviton shortage there
+surfaces immediately as unschedulable pods rather than being masked by a
+fallback, which is the intended trade-off for the cheapest, least-available
+environment.
 
 ### Topology spread — both axes
 

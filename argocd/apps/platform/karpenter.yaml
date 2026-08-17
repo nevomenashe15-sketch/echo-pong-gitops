@@ -27,7 +27,12 @@ metadata:
 spec:
   project: platform
   source:
-    repoURL: public.ecr.aws/karpenter
+    # oci:// prefix required here (not just in the AppProject sourceRepos
+    # whitelist below) -- this is how Argo CD recognizes an OCI Helm source
+    # at all. Without it the whitelist check fails: "public.ecr.aws/karpenter"
+    # and "oci://public.ecr.aws/karpenter" are different strings, and Argo CD
+    # rejects the Application as not permitted in the platform project.
+    repoURL: oci://public.ecr.aws/karpenter
     chart: karpenter
     targetRevision: 1.0.8
     helm:
