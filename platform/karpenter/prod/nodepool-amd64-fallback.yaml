@@ -53,7 +53,7 @@ spec:
           values: ["medium", "large", "xlarge"]
         - key: topology.kubernetes.io/zone
           operator: In
-          values: ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+          values: ["eu-central-1a", "eu-central-1b", "eu-central-1c"]
 
   # Deliberately smaller than the arm64 pool's limit. This is an escape hatch
   # for a capacity incident, not a second home for the workload — if it is ever

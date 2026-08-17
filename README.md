@@ -325,7 +325,7 @@ or Cilium being enabled — see the chart README.
    traffic properly, but ALB→Pod-IP traffic can only be expressed as an
    `ipBlock`, which is subnet-coarse. See the chart README.
 4. **Placeholder values throughout.** Account ID `000000000000`, region
-   `eu-west-1`, `example.com` hosts, all-zero digests, ACM/WAF ARNs and the VPC
+   `eu-central-1`, `example.com` hosts, all-zero digests, ACM/WAF ARNs and the VPC
    ID in the ALB controller Application are placeholders and must be replaced
    with real values from the Terraform repo's outputs before any deployment.
 5. **Cluster name is hardcoded per add-on Application.** The three platform

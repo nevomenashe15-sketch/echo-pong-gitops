@@ -32,7 +32,7 @@ spec:
       releaseName: aws-load-balancer-controller
       values: |
         clusterName: echo-pong-prod
-        region: eu-west-1
+        region: eu-central-1
         vpcId: vpc-00000000000000000
         serviceAccount:
           create: true

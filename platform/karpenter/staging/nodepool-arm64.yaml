@@ -44,7 +44,7 @@ spec:
           values: ["medium", "large"]
         - key: topology.kubernetes.io/zone
           operator: In
-          values: ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+          values: ["eu-central-1a", "eu-central-1b", "eu-central-1c"]
   limits:
     cpu: "16"
     memory: 64Gi
